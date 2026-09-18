@@ -1,0 +1,245 @@
+"""
+blender_export_unity.py
+Chuẩn hóa pivot -> freeze transform -> export FBX Y-Up cho Unity (URP).
+Yêu cầu: Blender 3.6+ (kiểm thử trên 4.x). Không lưu .blend.
+"""
+import argparse
+import os
+import re
+import sys
+
+import bpy
+from mathutils import Matrix, Vector
+
+EPS = 1e-6
+MAX_MATERIALS = 3
+EXPORTABLE = {"MESH", "ARMATURE", "EMPTY"}
+
+
+def parse_args():
+    argv = sys.argv
+    argv = argv[argv.index("--") + 1:] if "--" in argv else []
+    p = argparse.ArgumentParser(description="Blender -> Unity FBX exporter")
+    p.add_argument("--out", default="//Export", help="Thư mục xuất (hỗ trợ //relative với .blend)")
+    p.add_argument("--pivot", choices=("BASE_CENTER", "BOUNDS_CENTER", "WORLD_ORIGIN"),
+                   default="BASE_CENTER", help="Cách đặt pivot cho mesh cứng")
+    p.add_argument("--selected-only", action="store_true", help="Chỉ xử lý object đang chọn")
+    p.add_argument("--tri-budget", type=int, default=30000, help="Cảnh báo/lỗi khi vượt số tam giác")
+    p.add_argument("--combine", default="", help="Tên file để gộp mọi asset vào MỘT FBX")
+    p.add_argument("--no-bake-space", action="store_true", help="Tắt bake_space_transform")
+    p.add_argument("--dry-run", action="store_true", help="Chỉ kiểm tra, không sửa và không xuất")
+    return p.parse_args(argv)
+
+
+def ensure_object_mode():
+    active = bpy.context.view_layer.objects.active
+    if active is not None and active.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+
+def select_only(objs):
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+
+
+def sanitize(name):
+    return re.sub(r"[^A-Za-z0-9_\-]", "_", name)
+
+
+def collect_hierarchies(selected_only):
+    """Trả về list[(root, members)]; mỗi cây có ít nhất một mesh."""
+    source = bpy.context.selected_objects if selected_only else bpy.context.scene.objects
+    roots = {}
+    for obj in source:
+        if obj.type not in EXPORTABLE or not obj.visible_get():
+            continue
+        root = obj
+        while root.parent is not None:
+            root = root.parent
+        roots.setdefault(root.name, root)
+
+    result = []
+    for root in roots.values():
+        members = [root] + [c for c in root.children_recursive if c.type in EXPORTABLE]
+        if any(m.type == "MESH" for m in members):
+            result.append((root, members))
+    return result
+
+
+def triangle_count(obj):
+    ev = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    mesh = ev.to_mesh()
+    try:
+        mesh.calc_loop_triangles()
+        return len(mesh.loop_triangles)
+    finally:
+        ev.to_mesh_clear()
+
+
+def local_pivot(obj, mode):
+    corners = [Vector(c) for c in obj.bound_box]
+    xs, ys, zs = zip(*corners)
+    lo = Vector((min(xs), min(ys), min(zs)))
+    hi = Vector((max(xs), max(ys), max(zs)))
+    if mode == "BASE_CENTER":                       # Blender Z-up: đáy = min Z
+        return Vector(((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5, lo.z))
+    if mode == "BOUNDS_CENTER":
+        return (lo + hi) * 0.5
+    return obj.matrix_world.inverted() @ Vector((0.0, 0.0, 0.0))   # WORLD_ORIGIN
+
+
+def make_single_user(obj, log):
+    if obj.type == "MESH" and obj.data.users > 1:
+        obj.data = obj.data.copy()
+        log.append(f"  - {obj.name}: tách mesh data dùng chung thành bản riêng")
+
+
+def normalize_rigid(obj, mode):
+    """Đưa pivot về (0,0,0) rồi bake rotation/scale vào mesh. Chỉ cho object không có parent."""
+    pivot = local_pivot(obj, mode)
+    obj.data.transform(Matrix.Translation(-pivot), shape_keys=True)   # pivot cục bộ -> gốc cục bộ
+    obj.location = (0.0, 0.0, 0.0)                                    # gốc cục bộ -> gốc world
+
+    baked = obj.matrix_basis.copy()                                    # lúc này chỉ còn rotation + scale
+    obj.data.transform(baked, shape_keys=True)
+    obj.matrix_basis = Matrix.Identity(4)
+    obj.data.update()
+
+
+def normalize_rig(root, members):
+    """Cây có Armature: dời gốc cây về (0,0,0) rồi apply rotation/scale trên cả cây."""
+    root.location = (0.0, 0.0, 0.0)
+    select_only([root] + [m for m in members if m is not root])
+    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True, properties=True)
+
+
+def verify_frozen(obj, check_translation):
+    bpy.context.view_layer.update()
+    m = obj.matrix_world
+    rot_scale_ok = all(abs(m[r][c] - (1.0 if r == c else 0.0)) < 1e-5 for r in range(3) for c in range(3))
+    trans_ok = (not check_translation) or m.translation.length < 1e-5
+    return rot_scale_ok and trans_ok
+
+
+def export_fbx(objs, filepath, has_rig, bake_space):
+    select_only(objs)
+    bpy.ops.export_scene.fbx(
+        filepath=filepath,
+        use_selection=True,
+        object_types={"MESH", "ARMATURE", "EMPTY"},
+        axis_forward="-Z",                 # cặp trục này + bake => Unity nhận rotation (0,0,0), scale (1,1,1)
+        axis_up="Y",
+        global_scale=1.0,
+        apply_unit_scale=True,
+        apply_scale_options="FBX_SCALE_ALL",
+        use_space_transform=True,
+        bake_space_transform=bake_space and not has_rig,   # bake trục không an toàn với animation
+        use_mesh_modifiers=True,
+        mesh_smooth_type="FACE",
+        use_tspace=True,
+        add_leaf_bones=False,
+        use_armature_deform_only=True,
+        bake_anim=has_rig,
+        embed_textures=False,
+        path_mode="AUTO",
+    )
+
+
+def main():
+    args = parse_args()
+    errors, warnings, log = [], [], []
+    scene = bpy.context.scene
+
+    if abs(scene.unit_settings.scale_length - 1.0) > EPS:
+        errors.append(f"Unit Scale = {scene.unit_settings.scale_length}, cần 1.0 (1 unit = 1 m).")
+
+    ensure_object_mode()
+    units = collect_hierarchies(args.selected_only)
+    if not units:
+        errors.append("Không tìm thấy mesh hiển thị để export.")
+
+    out_dir = bpy.path.abspath(args.out)
+    if not args.dry_run:
+        os.makedirs(out_dir, exist_ok=True)
+
+    exported_sets = []   # (tên file, list object)
+
+    for root, members in units:
+        meshes = [m for m in members if m.type == "MESH"]
+        has_rig = any(m.type == "ARMATURE" for m in members)
+        hierarchical = has_rig or len(members) > 1     # một mesh đơn lẻ mới dùng được data API
+
+        negative = [m.name for m in members if min(m.scale) < 0.0]
+        if negative:
+            errors.append(f"{root.name}: scale âm ở {negative} — sửa trong Blender (Apply + Recalculate Normals).")
+            continue
+
+        for m in meshes:
+            tris = triangle_count(m)
+            slots = len([s for s in m.material_slots if s.material])
+            if tris > args.tri_budget:
+                errors.append(f"{m.name}: {tris} tris > ngân sách {args.tri_budget}.")
+            if slots > MAX_MATERIALS:
+                warnings.append(f"{m.name}: {slots} material > {MAX_MATERIALS} (dùng atlas).")
+            if not m.data.uv_layers:
+                warnings.append(f"{m.name}: không có UV.")
+
+        if args.dry_run:
+            continue
+
+        for m in meshes:
+            make_single_user(m, log)
+
+        if hierarchical:
+            normalize_rig(root, members)
+            if not verify_frozen(root, check_translation=True):
+                errors.append(f"{root.name}: freeze cây thất bại (kiểm tra parent-inverse/constraint).")
+                continue
+            warnings.append(f"{root.name}: cây nhiều object — pivot = origin của root; "
+                            "animation phải key lại nếu scale ≠ 1.")
+        else:
+            normalize_rigid(root, args.pivot)
+            if not verify_frozen(root, check_translation=True):
+                errors.append(f"{root.name}: freeze thất bại.")
+        exported_sets.append((sanitize(root.name), members, has_rig))
+
+    if errors:
+        report(errors, warnings, log)
+        return 1
+    if args.dry_run:
+        report(errors, warnings, ["dry-run: không sửa, không xuất."])
+        return 0
+
+    bake = not args.no_bake_space
+    if args.combine:
+        all_objs = [o for _, members, _ in exported_sets for o in members]
+        rig_any = any(r for _, _, r in exported_sets)
+        path = os.path.join(out_dir, sanitize(args.combine) + ".fbx")
+        export_fbx(all_objs, path, rig_any, bake)
+        log.append(f"  → {path}")
+    else:
+        for name, members, has_rig in exported_sets:
+            path = os.path.join(out_dir, name + ".fbx")
+            export_fbx(members, path, has_rig, bake)
+            log.append(f"  → {path}")
+
+    report(errors, warnings, log)
+    return 0
+
+
+def report(errors, warnings, log):
+    for line in log:
+        print("[export]", line)
+    for w in warnings:
+        print("[warn]  ", w)
+    for e in errors:
+        print("[ERROR] ", e)
+    print(f"[export] {len(errors)} lỗi, {len(warnings)} cảnh báo.")
+
+
+if __name__ == "__main__":
+    code = main()
+    if bpy.app.background:
+        sys.exit(code)
