@@ -1,258 +1,258 @@
 # SYSTEM_ORCHESTRATOR.md — Orchestration Pipeline
 
-> Đọc file này khi tác vụ đi qua ≥ 2 role, khi có xung đột giữa các role, hoặc khi cần biết định dạng bàn giao. Đọc trước, sau đó mới đọc từng role theo thứ tự pipeline.
+> Read this file when a task passes through ≥ 2 roles, when roles conflict, or when you need the handoff format. Read it first, then read each role in pipeline order.
 
 ---
 
-## 1. Pipeline 4 pha
+## 1. The 4-phase pipeline
 
 ```
- Ý tưởng / Yêu cầu
+ Idea / Requirement
         │
         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│ PHA 1 — ARCHITECTURE SPEC                     01_GAME_ARCHITECT│
-│  vào : yêu cầu feature, PROJECT_CONTEXT, ROADMAP task          │
-│  ra  : SPEC artifact (interface, event struct, asmdef, ADR)    │
-│  cổng: spec tự nhất quán, không phá DAG asmdef, có ADR nếu cần │
+│ PHASE 1 — ARCHITECTURE SPEC                   01_GAME_ARCHITECT│
+│  in  : feature request, PROJECT_CONTEXT, ROADMAP task          │
+│  out : SPEC artifact (interfaces, event structs, asmdef, ADR)  │
+│  gate: spec is self-consistent, keeps the asmdef DAG, ADR added│
 └───────────────────────────────┬───────────────────────────────┘
                                 ▼
 ┌───────────────────────────────────────────────────────────────┐
-│ PHA 2 — TECH ART & GAMEPLAY IMPLEMENTATION  (song song được)   │
+│ PHASE 2 — TECH ART & GAMEPLAY IMPLEMENTATION  (can be parallel)│
 │   02_GAMEPLAY_ENGINEER  ∥  03_TECH_ARTIST  ∥  04_AI_DESIGNER   │
-│  vào : SPEC artifact                                           │
-│  ra  : IMPL artifact (code, prefab, shader, FBX, BT asset)     │
-│  cổng: compile xanh, scripts/verify.sh exit 0, không magic num │
+│  in  : SPEC artifact                                           │
+│  out : IMPL artifact (code, prefabs, shaders, FBX, BT assets)  │
+│  gate: compiles green, scripts/verify.sh exit 0, no magic nums │
 └───────────────────────────────┬───────────────────────────────┘
                                 ▼
 ┌───────────────────────────────────────────────────────────────┐
-│ PHA 3 — ECONOMY INJECTION                    05_ECONOMY_BALANCER│
-│  vào : IMPL artifact + danh sách hằng số cần ngoại hóa         │
-│  ra  : DATA artifact (SO/JSON, công thức, bảng cân bằng)       │
-│  cổng: grep magic number = 0, round-trip JSON pass, min/max ok │
+│ PHASE 3 — ECONOMY INJECTION                  05_ECONOMY_BALANCER│
+│  in  : IMPL artifact + list of constants to externalize        │
+│  out : DATA artifact (SO/JSON, formulas, balance tables)       │
+│  gate: magic-number grep = 0, JSON round-trip pass, min/max ok │
 └───────────────────────────────┬───────────────────────────────┘
                                 ▼
 ┌───────────────────────────────────────────────────────────────┐
-│ PHA 4 — QA PROFILER AUDIT                        06_QA_PROFILER │
-│  vào : IMPL + DATA artifact                                    │
-│  ra  : QA REPORT (audit 10 điểm, số đo Profiler, verdict)      │
-│  cổng: PASS = merge; FAIL = trả về pha gây lỗi                 │
+│ PHASE 4 — QA PROFILER AUDIT                      06_QA_PROFILER │
+│  in  : IMPL + DATA artifacts                                   │
+│  out : QA REPORT (10-point audit, Profiler numbers, verdict)   │
+│  gate: PASS = merge; FAIL = return to the phase that caused it │
 └───────────────────────────────────────────────────────────────┘
-        │ FAIL ───────────► quay lại pha sở hữu lỗi (kèm file:line)
+        │ FAIL ───────────► back to the owning phase (with file:line)
         ▼ PASS
    /handover → SESSION_LOG.md + tick ROADMAP
 ```
 
-### Quy tắc pipeline
+### Pipeline rules
 
-1. **Không nhảy pha.** Pha N+1 chỉ bắt đầu khi artifact pha N có `status: READY`.
-2. **Song song ở pha 2** chỉ khi các role không sửa cùng file. Nếu trùng, tuần tự hóa theo thứ tự: 02 → 04 → 03.
-3. **Ngoại lệ đường tắt** (chỉ cho việc nhỏ, ≤ 1 file, không đổi interface): bỏ qua Pha 1 và 3, nhưng **Pha 4 không bao giờ bỏ**.
-4. **Vòng phản hồi:** QA `FAIL` → tạo `DEFECT` list, gán về role sở hữu file lỗi; sau khi sửa, chạy lại chỉ các mục audit bị FAIL và các mục liên quan (không audit lại toàn bộ trừ khi đụng interface).
-5. Mỗi role, khi bắt đầu, in dòng `[ROLE: <tên>] nhận artifact <id> (status: READY)`. Khi xong in `[ROLE: <tên>] phát artifact <id> (status: READY|BLOCKED)`.
+1. **No phase skipping.** Phase N+1 starts only when the phase N artifact has `status: READY`.
+2. **Phase 2 may run in parallel** only when the roles do not edit the same file. If they overlap, serialize in this order: 02 → 04 → 03.
+3. **Shortcut exception** (small work only: ≤ 1 file, no interface change): skip Phases 1 and 3, but **Phase 4 is never skipped**.
+4. **Feedback loop:** QA `FAIL` → create a `DEFECT` list, assign each to the role that owns the failing file; after the fix, re-run only the failed audit items and related ones (do not re-audit everything unless an interface was touched).
+5. Each role prints `[ROLE: <name>] received artifact <id> (status: READY)` when it starts and `[ROLE: <name>] emitted artifact <id> (status: READY|BLOCKED)` when it finishes.
 
 ---
 
-## 2. Bảng sở hữu (Ownership)
+## 2. Ownership table
 
-| Tài nguyên | Chủ sở hữu | Role khác được phép |
+| Resource | Owner | Other roles may |
 |---|---|---|
-| `Vanguard.Core` (interface, EventBus, Pool) | 01 | đọc; đề xuất qua SPEC |
-| `docs/context/CONTRACTS_ADR.md` | 01 | 06 có quyền phản đối kèm số đo |
-| Player/Camera/Combat/Physics code | 02 | 06 review |
-| Shader, material, Blender/FBX, import | 03 | 06 review draw call |
-| BT/FSM AI, NavMesh, perception | 04 | 02 cung cấp interface đọc trạng thái |
-| SO/JSON số liệu, công thức, bảng | 05 | mọi role **đọc**, không sửa hằng số |
+| `Vanguard.Core` (interfaces, EventBus, Pool) | 01 | read; propose via SPEC |
+| `docs/context/CONTRACTS_ADR.md` | 01 | 06 may object with measurements |
+| Player/Camera/Combat/Physics code | 02 | 06 reviews |
+| Shaders, materials, Blender/FBX, import | 03 | 06 reviews draw calls |
+| BT/FSM AI, NavMesh, perception | 04 | 02 provides state-reading interfaces |
+| SO/JSON data, formulas, tables | 05 | every role **reads**, none edits constants |
 | Profiling, audit, verdict | 06 | — |
-| `PROJECT_CONTEXT.md` (ngân sách) | Người dùng | 06 đề xuất thay đổi ngân sách kèm bằng chứng |
+| `PROJECT_CONTEXT.md` (budgets) | The user | 06 proposes budget changes with evidence |
 
-Sửa file không thuộc quyền sở hữu = **out-of-scope violation** → phải dừng và tạo `REQUEST` tới chủ sở hữu.
+Editing a file you do not own = **out-of-scope violation** → stop and create a `REQUEST` to the owner.
 
 ---
 
 ## 3. Handoff Artifact Schema
 
-Mọi bàn giao là **một khối Markdown có front-matter YAML + nội dung**. Lưu tạm ở `.claude/local/handoff/<id>.md` (gitignored) hoặc dán trực tiếp trong hội thoại. Bản chính thức của quyết định kiến trúc vào ADR.
+Every handoff is **one Markdown block with YAML front-matter + body**. Store it temporarily in `.claude/local/handoff/<id>.md` (gitignored) or paste it directly in the conversation. The official record of an architectural decision goes into an ADR.
 
-### 3.1 Schema chung (mọi loại artifact)
+### 3.1 Common schema (all artifact types)
 
 ```yaml
 ---
-id: HO-<milestone>-<task>-<phase>      # ví dụ HO-M2-04-P1
+id: HO-<milestone>-<task>-<phase>      # e.g. HO-M2-04-P1
 type: SPEC | IMPL | DATA | QA_REPORT | DEFECT | REQUEST
-from: 01_GAME_ARCHITECT                # role phát
-to: 02_GAMEPLAY_ENGINEER               # role nhận (hoặc list)
-task: M2-04                            # ID trong ROADMAP_BACKLOG
+from: 01_GAME_ARCHITECT                # sending role
+to: 02_GAMEPLAY_ENGINEER               # receiving role (or a list)
+task: M2-04                            # ID in ROADMAP_BACKLOG
 status: READY | BLOCKED | SUPERSEDED
 created: 2026-09-19
-depends_on: [HO-M2-03-P1]              # artifact tiên quyết (có thể rỗng)
+depends_on: [HO-M2-03-P1]              # prerequisite artifacts (may be empty)
 ---
 ```
 
-### 3.2 `SPEC` (Pha 1 → Pha 2)
+### 3.2 `SPEC` (Phase 1 → Phase 2)
 
 ```markdown
 ## Goal
-<1–2 câu, có số đo>
+<1–2 sentences, with a measurable target>
 
 ## Contracts
-| Type | File (đường dẫn đích) | Assembly | Chữ ký |
+| Type | File (target path) | Assembly | Signature |
 |---|---|---|---|
 | interface | Assets/_Project/Scripts/Core/IHitReceiver.cs | Vanguard.Core | `float Receive(in HitInfo h)` |
 
-## Events (struct message trên EventBus)
-| Struct | Trường | Publisher | Subscriber |
+## Events (struct messages on the EventBus)
+| Struct | Fields | Publisher | Subscriber |
 |---|---|---|---|
 | WeaponHitEvent | DamageData Damage; int TargetId | WeaponTracer | DamagePopupSpawner, ComboMeter |
 
 ## Assembly / Dependency changes
 - + `Vanguard.Combat` → refs: Core, Data
-- Đồ thị DAG sau thay đổi: <liệt kê>, không vòng: ✔/✘
+- DAG after the change: <list>, no cycles: ✔/✘
 
 ## Constraints
-- Zero-GC: <hot path liên quan>
-- Pool: <thực thể dùng pool>
-- Budget: <ms / draw call liên quan>
+- Zero-GC: <relevant hot paths>
+- Pool: <entities that use pooling>
+- Budget: <relevant ms / draw calls>
 
 ## Out of scope
-- <điều KHÔNG làm ở task này>
+- <what this task does NOT do>
 
-## Acceptance Criteria (lấy từ ROADMAP)
-- <AC đo được>
+## Acceptance Criteria (from ROADMAP)
+- <measurable AC>
 ```
 
-### 3.3 `IMPL` (Pha 2 → Pha 3/4)
+### 3.3 `IMPL` (Phase 2 → Phase 3/4)
 
 ```markdown
 ## Changed files
-| File | Loại (A/M/D) | Ghi chú |
+| File | Type (A/M/D) | Notes |
 |---|---|---|
 
-## Externalized constants (cần 05 xử lý)
-| Vị trí | Giá trị hiện tại | Ý nghĩa | Đơn vị | Min | Max |
+## Externalized constants (for 05 to handle)
+| Location | Current value | Meaning | Unit | Min | Max |
 |---|---|---|---|---|---|
-| WeaponTracer.cs:41 | 16 | kích thước buffer hit | phần tử | 4 | 64 |
+| WeaponTracer.cs:41 | 16 | hit buffer size | elements | 4 | 64 |
 
 ## Hot paths
-| Hàm | Gọi từ | Tần suất | Alloc dự kiến |
+| Function | Called from | Frequency | Expected alloc |
 |---|---|---|---|
 
 ## Self-check
-- scripts/verify.sh: exit 0 (<n> test pass)
-- Self-Healing Loop: <số vòng>
+- scripts/verify.sh: exit 0 (<n> tests passed)
+- Self-Healing Loop: <number of rounds>
 
 ## Known limitations
 ```
 
-### 3.4 `DATA` (Pha 3 → Pha 4)
+### 3.4 `DATA` (Phase 3 → Phase 4)
 
 ```markdown
 ## Assets
-| Path | Loại | Schema version |
+| Path | Type | Schema version |
 |---|---|---|
 | Assets/_Project/Data/SO_Weapon_Katana.asset | WeaponDefinition | 1 |
 
-## Formulas (ký hiệu + ví dụ số)
-| Tên | Công thức | Miền | Ví dụ |
+## Formulas (symbols + numeric example)
+| Name | Formula | Domain | Example |
 |---|---|---|---|
 | Mitigation | A/(A+K) | A≥0, K>0 | A=100,K=100 → 0.5 |
 
 ## Balance table
-<bảng CSV/Markdown: level, HP, dmg, TTK>
+<CSV/Markdown table: level, HP, dmg, TTK>
 
 ## Validation
-- OnValidate rules: <danh sách>
+- OnValidate rules: <list>
 - JSON round-trip: pass/fail
 ```
 
-### 3.5 `QA_REPORT` (Pha 4 → Người dùng/pha gây lỗi)
+### 3.5 `QA_REPORT` (Phase 4 → user / the phase that caused the failure)
 
 ```markdown
 ## Verdict: PASS | FAIL
 
 ## Measurements (Development Build, Sandbox_Arena)
-| Chỉ số | Ngân sách | Đo được | Đạt |
+| Metric | Budget | Measured | Met |
 |---|---|---|---|
 | Frame p99 (ms) | ≤ 16.6 | 14.2 | ✔ |
 | GC Alloc / frame (B) | 0 | 0 | ✔ |
 | Batches | ≤ 150 | 132 | ✔ |
 
-## Audit 10 điểm
-| # | Mục | Kết quả | Bằng chứng (file:line / capture) |
+## 10-point audit
+| # | Item | Result | Evidence (file:line / capture) |
 |---|---|---|---|
 
-## Defects (nếu FAIL)
-| ID | Severity | file:line | Mô tả | Gán cho |
+## Defects (if FAIL)
+| ID | Severity | file:line | Description | Assigned to |
 |---|---|---|---|---|
 ```
 
 ### 3.6 `DEFECT` / `REQUEST`
 
 ```markdown
-## Vi phạm / Yêu cầu
-- Điều khoản: <CLAUDE.md §1.1 / PROJECT_CONTEXT §2 / ...>
-- Vị trí: <file:line>
-- Bằng chứng: <số đo, stack trace>
-- Sửa mong đợi: <mô tả hành vi/đích, không viết code hộ role khác>
-- Hạn: <task/milestone>
+## Violation / Request
+- Clause: <CLAUDE.md §1.1 / PROJECT_CONTEXT §2 / ...>
+- Location: <file:line>
+- Evidence: <measurements, stack trace>
+- Expected fix: <describe the behavior/target, do not write code for another role>
+- Deadline: <task/milestone>
 ```
 
 ---
 
 ## 4. Conflict Resolution Matrix
 
-Khi hai role đưa ra yêu cầu mâu thuẫn, áp dụng bảng ưu tiên **từ trên xuống**; dòng trên thắng dòng dưới. Người dùng luôn có quyền phán quyết cuối cùng, nhưng phải được thông báo bằng dạng `TRADE-OFF NOTICE` (mục 4.2).
+When two roles make conflicting demands, apply the priority table **from top to bottom**; a higher row beats a lower row. The user always has the final say, but must be informed with a `TRADE-OFF NOTICE` (section 4.2).
 
-### 4.1 Thứ tự ưu tiên
+### 4.1 Priority order
 
-| Hạng | Nguyên tắc thắng | Thua | Ví dụ áp dụng |
+| Rank | Winning principle | Loses | Example |
 |---|---|---|---|
-| 1 | **Zero-GC & frame budget** | Tiện ích/nhanh triển khai | Gameplay muốn dùng LINQ `Where` cho lọc mục tiêu → QA buộc dùng `for` + list cache. Thắng: 06. |
-| 2 | **Strict Interface Contracts** (CONTRACTS_ADR) | Hack cục bộ (ad-hoc) | AI muốn gọi thẳng `PlayerController.health` → buộc qua `IDamageable`/event. Thắng: 01. |
-| 3 | **Correctness** (đúng toán, không NaN, không xuyên tường) | Hiệu năng vi mô chưa đo | Tối ưu `sqrMagnitude` bỏ kiểm tra zero-vector gây NaN → giữ kiểm tra. Thắng: 02. |
-| 4 | **Số đo Profiler** | Trực giác/giả định | "Chỗ này chắc chậm" mà capture không thấy → không tối ưu. Thắng: 06 (bằng chứng). |
-| 5 | **Data-driven** (SO/JSON) | Hằng số nhúng trong code | Gameplay hardcode `damage = 25` → chuyển sang SO. Thắng: 05. |
-| 6 | **Draw call budget (≤ 150)** | Thẩm mỹ không thiết yếu | Artist muốn thêm 6 material/nhân vật → ép về ≤ 3, dùng atlas. Thắng: 03 + 06 (nhưng 03 sở hữu giải pháp). |
-| 7 | **Độ đơn giản** | Tổng quát hóa sớm | Kiến trúc thêm lớp trừu tượng cho 1 use case → bỏ. Thắng: 02 (nếu 01 không chứng minh được ≥ 2 use case). |
-| 8 | **Tốc độ triển khai** | — | Chỉ được ưu tiên khi hạng 1–7 không bị vi phạm. |
+| 1 | **Zero-GC & frame budget** | Convenience/speed of implementation | Gameplay wants LINQ `Where` to filter targets → QA requires `for` + a cached list. Winner: 06. |
+| 2 | **Strict Interface Contracts** (CONTRACTS_ADR) | Ad-hoc local hacks | AI wants to call `PlayerController.health` directly → must go through `IDamageable`/events. Winner: 01. |
+| 3 | **Correctness** (correct math, no NaN, no wall clipping) | Unmeasured micro-performance | Optimizing with `sqrMagnitude` while dropping the zero-vector check causes NaN → keep the check. Winner: 02. |
+| 4 | **Profiler measurements** | Intuition/assumptions | "This spot is probably slow" but the capture shows nothing → do not optimize. Winner: 06 (evidence). |
+| 5 | **Data-driven** (SO/JSON) | Constants embedded in code | Gameplay hardcodes `damage = 25` → move to an SO. Winner: 05. |
+| 6 | **Draw call budget (≤ 150)** | Non-essential aesthetics | Artist wants 6 more materials per character → force it down to ≤ 3 with an atlas. Winner: 03 + 06 (03 owns the solution). |
+| 7 | **Simplicity** | Premature generalization | Architecture adds an abstraction layer for a single use case → drop it. Winner: 02 (unless 01 proves ≥ 2 use cases). |
+| 8 | **Speed of implementation** | — | May win only when ranks 1–7 are not violated. |
 
-### 4.2 Thủ tục xung đột
+### 4.2 Conflict procedure
 
-1. Role phát hiện xung đột phát `REQUEST` kèm điều khoản bị vi phạm.
-2. Tra bảng 4.1 → hạng cao hơn thắng. Nếu cùng hạng: **số đo** quyết định; không có số đo → đo trước (06 chạy Profiler), rồi quyết.
-3. Nếu người dùng yêu cầu vi phạm hạng 1–2 (ví dụ "cứ dùng LINQ cho nhanh"), role **không im lặng làm theo**: phát `TRADE-OFF NOTICE`:
+1. The role that detects a conflict emits a `REQUEST` citing the violated clause.
+2. Look up table 4.1 → the higher rank wins. Same rank: **measurements** decide; with no measurements → measure first (06 runs the Profiler), then decide.
+3. If the user asks for a rank 1–2 violation (e.g. "just use LINQ, it's faster to write"), the role **does not silently comply**: it issues a `TRADE-OFF NOTICE`:
 
 ```
 TRADE-OFF NOTICE
-Yêu cầu: <...>
-Vi phạm: CLAUDE.md §1.1 (Zero-GC trong hot path)
-Chi phí ước tính: ~<n> B/frame → GC spike mỗi ~<t> giây
-Phương án thay thế: <đoạn 1 dòng>
-Nếu vẫn tiếp tục: đánh dấu [DEBT-HIGH] trong SESSION_LOG và mở task hoàn nợ trong ROADMAP.
+Request: <...>
+Violates: CLAUDE.md §1.1 (Zero-GC in the hot path)
+Estimated cost: ~<n> B/frame → GC spike roughly every ~<t> seconds
+Alternative: <one-line alternative>
+If you still proceed: mark [DEBT-HIGH] in SESSION_LOG and open a repayment task in ROADMAP.
 ```
 
-4. Chỉ khi người dùng xác nhận tường minh mới triển khai; luôn ghi nợ.
+4. Implement only after the user explicitly confirms; always record the debt.
 
-### 4.3 Xung đột phổ biến — phán quyết sẵn
+### 4.3 Common conflicts — pre-decided rulings
 
-| Tình huống | Phán quyết |
+| Situation | Ruling |
 |---|---|
-| 02 muốn `Instantiate` đạn "cho nhanh" | Cấm. Dùng `ObjectPool`. (Hạng 1) |
-| 04 muốn `NavMeshAgent.SetDestination` mỗi frame | Cấm. Throttle ≤ 2 Hz/agent, chỉ khi mục tiêu dịch > 0.5 m. (Hạng 1) |
-| 05 muốn đổi chữ ký `DamageData` để thêm trường | Chuyển 01: ADR mới + cập nhật mọi implementer cùng commit. (Hạng 2) |
-| 03 muốn Shader dùng `Texture2D.GetPixels` runtime | Cấm (alloc lớn). Dùng RenderTexture/GPU. (Hạng 1) |
-| 06 phát hiện bug logic ngoài phạm vi audit | Ghi `DEFECT` cho chủ sở hữu, không tự sửa logic. |
-| 02 và 04 cùng sửa `EnemyController.cs` | Tuần tự hóa: 02 hoàn tất giao diện đọc trạng thái, 04 làm tiếp. |
-| Hai role khác nhau về đơn vị (độ vs radian) | Theo `PROJECT_CONTEXT`: góc lưu độ ở SO/JSON, chuyển radian ở biên tính toán. |
+| 02 wants to `Instantiate` bullets "for speed" | Forbidden. Use `ObjectPool`. (Rank 1) |
+| 04 wants `NavMeshAgent.SetDestination` every frame | Forbidden. Throttle to ≤ 2 Hz/agent, only when the target moved > 0.5 m. (Rank 1) |
+| 05 wants to change the `DamageData` signature to add a field | Route to 01: new ADR + update every implementer in the same commit. (Rank 2) |
+| 03 wants a shader that uses `Texture2D.GetPixels` at runtime | Forbidden (large allocation). Use a RenderTexture/GPU. (Rank 1) |
+| 06 finds a logic bug outside the audit scope | File a `DEFECT` for the owner; do not fix the logic yourself. |
+| 02 and 04 both edit `EnemyController.cs` | Serialize: 02 finishes the state-reading interface, then 04 continues. |
+| Two roles disagree on units (degrees vs radians) | Follow `PROJECT_CONTEXT`: store angles in degrees in SO/JSON, convert to radians at the calculation boundary. |
 
 ---
 
-## 5. Kích hoạt orchestration
+## 5. Triggering orchestration
 
-Khi người dùng giao một feature mới, Claude làm đúng theo thứ tự:
+When the user hands over a new feature, Claude does exactly this, in order:
 
-1. Đọc `PROJECT_CONTEXT.md`, `SESSION_LOG.md`, `ROADMAP_BACKLOG.md` (Session Start).
-2. Xác định task ID trong ROADMAP; nếu không có → hỏi người dùng có thêm vào ROADMAP không.
-3. In kế hoạch pipeline dạng bảng: pha → role → artifact đầu ra → cổng.
-4. Thực thi từng pha; sau mỗi pha in tóm tắt artifact (không dán cả code nếu đã ghi vào file).
-5. Sau Pha 4 PASS → `/handover`.
+1. Read `PROJECT_CONTEXT.md`, `SESSION_LOG.md`, `ROADMAP_BACKLOG.md` (Session Start).
+2. Identify the task ID in ROADMAP; if none → ask the user whether to add it to ROADMAP.
+3. Print the pipeline plan as a table: phase → role → output artifact → gate.
+4. Execute each phase; after each phase print an artifact summary (do not paste the whole code if it was already written to a file).
+5. After Phase 4 PASS → `/handover`.

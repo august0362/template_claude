@@ -96,7 +96,7 @@ Làm task M1-02: Zero-GC Event Bus.
 Kích hoạt thẳng một role (mỗi role có "One-Line Activation Trigger" ở mục 6 của file của nó), ví dụ:
 
 ```
-Kích hoạt QA_PROFILER: đọc .claude/agents/06_QA_PROFILER.md và PROJECT_CONTEXT.md (§2), rồi audit 10 điểm + đo Profiler cho: commit HEAD — chạy scripts/verify.sh và scripts/audit_hotpath.py, trả QA_REPORT.
+Activate QA_PROFILER: read .claude/agents/06_QA_PROFILER.md and PROJECT_CONTEXT.md (§2), then run the 10-point audit + Profiler measurements for: commit HEAD — run scripts/verify.sh and scripts/audit_hotpath.py, return a QA_REPORT with a PASS/FAIL verdict.
 ```
 
 **Kết thúc session:**
